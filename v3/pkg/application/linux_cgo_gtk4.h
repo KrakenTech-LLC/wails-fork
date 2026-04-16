@@ -179,6 +179,9 @@ void show_message_dialog(GtkWindow *parent, const char *heading, const char *bod
 
 char* clipboard_get_text_sync(void);
 void clipboard_free_text(char *text);
+unsigned char* clipboard_get_image_png_sync(gsize *length);
+gboolean clipboard_set_image_bytes(const unsigned char *data, gsize length);
+void clipboard_free_bytes(unsigned char *data);
 
 // ============================================================================
 // Window size constraints

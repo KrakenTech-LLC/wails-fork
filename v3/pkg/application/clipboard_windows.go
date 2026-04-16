@@ -24,6 +24,19 @@ func (m *windowsClipboard) text() (string, bool) {
 	return text, err == nil
 }
 
+func (m *windowsClipboard) setImage(data []byte) bool {
+	m.lock.Lock()
+	defer m.lock.Unlock()
+	return w32.SetClipboardImage(data) == nil
+}
+
+func (m *windowsClipboard) image() ([]byte, bool) {
+	m.lock.Lock()
+	defer m.lock.Unlock()
+	imageData, err := w32.GetClipboardImage()
+	return imageData, err == nil
+}
+
 func newClipboardImpl() *windowsClipboard {
 	return &windowsClipboard{}
 }

@@ -18,6 +18,14 @@ func (c *iosClipboardImpl) text() (string, bool) {
 	return "", false
 }
 
+func (c *iosClipboardImpl) setImage(data []byte) bool {
+	return false
+}
+
+func (c *iosClipboardImpl) image() ([]byte, bool) {
+	return nil, false
+}
+
 // SetClipboardText sets the clipboard text on iOS
 func (c *ClipboardManager) SetClipboardText(text string) error {
 	// iOS clipboard implementation would go here

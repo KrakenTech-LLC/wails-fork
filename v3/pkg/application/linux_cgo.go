@@ -684,13 +684,17 @@ func (a *linuxApp) setIcon(icon []byte) {
 }
 
 // Clipboard
-func clipboardGet() string {
+func clipboardGetText() (string, bool) {
 	clip := C.gtk_clipboard_get(C.GDK_SELECTION_CLIPBOARD)
 	text := C.gtk_clipboard_wait_for_text(clip)
-	return C.GoString(text)
+	if text == nil {
+		return "", false
+	}
+	defer C.g_free(C.gpointer(text))
+	return C.GoString(text), true
 }
 
-func clipboardSet(text string) {
+func clipboardSetText(text string) bool {
 	cText := C.CString(text)
 	clip := C.gtk_clipboard_get(C.GDK_SELECTION_CLIPBOARD)
 	C.gtk_clipboard_set_text(clip, cText, -1)
@@ -698,6 +702,61 @@ func clipboardSet(text string) {
 	clip = C.gtk_clipboard_get(C.GDK_SELECTION_PRIMARY)
 	C.gtk_clipboard_set_text(clip, cText, -1)
 	C.free(unsafe.Pointer(cText))
+	return true
+}
+
+func clipboardGetImage() ([]byte, bool) {
+	clip := C.gtk_clipboard_get(C.GDK_SELECTION_CLIPBOARD)
+	if C.gtk_clipboard_wait_is_image_available(clip) == 0 {
+		return nil, false
+	}
+	pixbuf := C.gtk_clipboard_wait_for_image(clip)
+	if pixbuf == nil {
+		return nil, false
+	}
+	defer C.g_object_unref(C.gpointer(pixbuf))
+
+	format := C.CString("png")
+	defer C.free(unsafe.Pointer(format))
+
+	var buffer *C.gchar
+	var bufferSize C.gsize
+	var gerror *C.GError
+	if C.gdk_pixbuf_save_to_buffer(pixbuf, &buffer, &bufferSize, format, &gerror, nil) == 0 {
+		if gerror != nil {
+			C.g_error_free(gerror)
+		}
+		return nil, false
+	}
+	defer C.g_free(C.gpointer(buffer))
+
+	return C.GoBytes(unsafe.Pointer(buffer), C.int(bufferSize)), true
+}
+
+func clipboardSetImage(data []byte) bool {
+	if len(data) == 0 {
+		return false
+	}
+
+	gbytes := C.g_bytes_new(C.gconstpointer(unsafe.Pointer(&data[0])), C.ulong(len(data)))
+	defer C.g_bytes_unref(gbytes)
+	stream := C.g_memory_input_stream_new_from_bytes(gbytes)
+	defer C.g_object_unref(C.gpointer(stream))
+
+	var gerror *C.GError
+	pixbuf := C.gdk_pixbuf_new_from_stream(stream, nil, &gerror)
+	if gerror != nil {
+		C.g_error_free(gerror)
+		return false
+	}
+	if pixbuf == nil {
+		return false
+	}
+	defer C.g_object_unref(C.gpointer(pixbuf))
+
+	clip := C.gtk_clipboard_get(C.GDK_SELECTION_CLIPBOARD)
+	C.gtk_clipboard_set_image(clip, pixbuf)
+	return true
 }
 
 // Menu

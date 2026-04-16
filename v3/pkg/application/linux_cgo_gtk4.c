@@ -854,6 +854,7 @@ void show_message_dialog(GtkWindow *parent, const char *heading, const char *bod
 
 static char *clipboard_sync_result = NULL;
 static gboolean clipboard_sync_done = FALSE;
+static GdkTexture *clipboard_sync_texture = NULL;
 
 static void on_clipboard_sync_finish(GObject *source, GAsyncResult *result, gpointer user_data) {
     GdkClipboard *clipboard = GDK_CLIPBOARD(source);
@@ -889,6 +890,89 @@ char* clipboard_get_text_sync(void) {
 void clipboard_free_text(char *text) {
     if (text != NULL) {
         g_free(text);
+    }
+}
+
+static void on_clipboard_texture_sync_finish(GObject *source, GAsyncResult *result, gpointer user_data) {
+    GdkClipboard *clipboard = GDK_CLIPBOARD(source);
+    GError *error = NULL;
+
+    clipboard_sync_texture = gdk_clipboard_read_texture_finish(clipboard, result, &error);
+    if (error != NULL) {
+        DEBUG_LOG("clipboard image read error: %s", error->message);
+        g_error_free(error);
+        clipboard_sync_texture = NULL;
+    }
+    clipboard_sync_done = TRUE;
+}
+
+unsigned char* clipboard_get_image_png_sync(gsize *length) {
+    GdkDisplay *display = gdk_display_get_default();
+    GdkClipboard *clipboard = gdk_display_get_clipboard(display);
+
+    clipboard_sync_done = FALSE;
+    clipboard_sync_texture = NULL;
+
+    gdk_clipboard_read_texture_async(clipboard, NULL, on_clipboard_texture_sync_finish, NULL);
+
+    GMainContext *ctx = g_main_context_default();
+    while (!clipboard_sync_done) {
+        g_main_context_iteration(ctx, TRUE);
+    }
+
+    if (clipboard_sync_texture == NULL) {
+        return NULL;
+    }
+
+    GBytes *bytes = gdk_texture_save_to_png_bytes(clipboard_sync_texture);
+    g_object_unref(clipboard_sync_texture);
+    clipboard_sync_texture = NULL;
+    if (bytes == NULL) {
+        return NULL;
+    }
+
+    gsize size = 0;
+    const unsigned char *source = g_bytes_get_data(bytes, &size);
+    if (source == NULL || size == 0) {
+        g_bytes_unref(bytes);
+        return NULL;
+    }
+
+    unsigned char *result = g_malloc(size);
+    memcpy(result, source, size);
+    *length = size;
+    g_bytes_unref(bytes);
+    return result;
+}
+
+gboolean clipboard_set_image_bytes(const unsigned char *data, gsize length) {
+    if (data == NULL || length == 0) {
+        return FALSE;
+    }
+
+    GBytes *bytes = g_bytes_new(data, length);
+    GError *error = NULL;
+    GdkTexture *texture = gdk_texture_new_from_bytes(bytes, &error);
+    g_bytes_unref(bytes);
+    if (error != NULL) {
+        DEBUG_LOG("clipboard image write error: %s", error->message);
+        g_error_free(error);
+        return FALSE;
+    }
+    if (texture == NULL) {
+        return FALSE;
+    }
+
+    GdkDisplay *display = gdk_display_get_default();
+    GdkClipboard *clipboard = gdk_display_get_clipboard(display);
+    gdk_clipboard_set_texture(clipboard, texture);
+    g_object_unref(texture);
+    return TRUE;
+}
+
+void clipboard_free_bytes(unsigned char *data) {
+    if (data != NULL) {
+        g_free(data);
     }
 }
 

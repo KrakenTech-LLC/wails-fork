@@ -217,22 +217,40 @@ func (a *linuxApp) setIcon(icon []byte) {
 	defer C.g_bytes_unref(gbytes)
 }
 
-func clipboardGet() string {
+func clipboardGetText() (string, bool) {
 	cText := C.clipboard_get_text_sync()
 	if cText != nil {
 		result := C.GoString(cText)
 		C.clipboard_free_text(cText)
-		return result
+		return result, true
 	}
-	return ""
+	return "", false
 }
 
-func clipboardSet(text string) {
+func clipboardSetText(text string) bool {
+	cText := C.CString(text)
 	display := C.gdk_display_get_default()
 	clip := C.gdk_display_get_clipboard(display)
-	cText := C.CString(text)
 	C.gdk_clipboard_set_text(clip, cText)
 	C.free(unsafe.Pointer(cText))
+	return true
+}
+
+func clipboardGetImage() ([]byte, bool) {
+	var length C.gsize
+	imageData := C.clipboard_get_image_png_sync(&length)
+	if imageData == nil || length == 0 {
+		return nil, false
+	}
+	defer C.clipboard_free_bytes(imageData)
+	return C.GoBytes(unsafe.Pointer(imageData), C.int(length)), true
+}
+
+func clipboardSetImage(data []byte) bool {
+	if len(data) == 0 {
+		return false
+	}
+	return bool(C.clipboard_set_image_bytes((*C.uchar)(unsafe.Pointer(&data[0])), C.gsize(len(data))))
 }
 
 // Menu - GTK4 uses GMenu/GAction instead of GtkMenu

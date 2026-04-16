@@ -7,15 +7,29 @@
 package w32
 
 import (
+	"bytes"
+	"image"
+	"image/draw"
+	"image/png"
 	"runtime"
 	"syscall"
 	"time"
 	"unsafe"
+
+	_ "image/gif"
+	_ "image/jpeg"
+	_ "image/png"
 )
 
 const (
 	cfUnicodetext = 13
 	gmemMoveable  = 0x0002
+)
+
+var (
+	procRegisterClipboardFormat = moduser32.NewProc("RegisterClipboardFormatW")
+	procGetDIBits               = modgdi32.NewProc("GetDIBits")
+	procGlobalSize              = kernel32.NewProc("GlobalSize")
 )
 
 // waitOpenClipboard opens the clipboard, waiting for up to a second to do so.
@@ -140,4 +154,222 @@ func SetClipboardText(text string) error {
 		return err
 	}
 	return nil
+}
+
+func GetClipboardImage() ([]byte, error) {
+	runtime.LockOSThread()
+	defer runtime.UnlockOSThread()
+
+	pngFormat := registerClipboardFormat("PNG")
+	if pngFormat != 0 && IsClipboardFormatAvailable(pngFormat) {
+		imageData, err := getClipboardPNG(pngFormat)
+		if err == nil {
+			return imageData, nil
+		}
+	}
+
+	if !IsClipboardFormatAvailable(CF_BITMAP) {
+		return nil, syscall.EINVAL
+	}
+
+	if err := waitOpenClipboard(); err != nil {
+		return nil, err
+	}
+	defer procCloseClipboard.Call()
+
+	handle, _, err := procGetClipboardData.Call(uintptr(CF_BITMAP))
+	if handle == 0 {
+		return nil, err
+	}
+
+	var bmp BITMAP
+	if GetObject(HGDIOBJ(handle), unsafe.Sizeof(bmp), unsafe.Pointer(&bmp)) == 0 {
+		return nil, syscall.GetLastError()
+	}
+
+	width := int(bmp.BmWidth)
+	height := int(bmp.BmHeight)
+	if width <= 0 || height <= 0 {
+		return nil, syscall.EINVAL
+	}
+
+	hdc := CreateCompatibleDC(0)
+	if hdc == 0 {
+		return nil, syscall.GetLastError()
+	}
+	defer DeleteDC(hdc)
+
+	oldBitmap := SelectObject(hdc, HGDIOBJ(HBITMAP(handle)))
+	defer SelectObject(hdc, oldBitmap)
+
+	var bi BITMAPINFO
+	bi.BmiHeader.BiSize = uint32(unsafe.Sizeof(bi.BmiHeader))
+	bi.BmiHeader.BiWidth = bmp.BmWidth
+	bi.BmiHeader.BiHeight = bmp.BmHeight
+	bi.BmiHeader.BiPlanes = 1
+	bi.BmiHeader.BiBitCount = 32
+	bi.BmiHeader.BiCompression = BI_RGB
+
+	pixels := make([]byte, width*height*4)
+	ret, _, err := procGetDIBits.Call(
+		uintptr(hdc),
+		handle,
+		0,
+		uintptr(height),
+		uintptr(unsafe.Pointer(&pixels[0])),
+		uintptr(unsafe.Pointer(&bi)),
+		DIB_RGB_COLORS,
+	)
+	if ret == 0 {
+		return nil, err
+	}
+
+	result := image.NewNRGBA(image.Rect(0, 0, width, height))
+	for y := 0; y < height; y++ {
+		for x := 0; x < width; x++ {
+			sourceIndex := ((height-1-y)*width + x) * 4
+			targetIndex := result.PixOffset(x, y)
+			result.Pix[targetIndex+0] = pixels[sourceIndex+2]
+			result.Pix[targetIndex+1] = pixels[sourceIndex+1]
+			result.Pix[targetIndex+2] = pixels[sourceIndex+0]
+			result.Pix[targetIndex+3] = pixels[sourceIndex+3]
+		}
+	}
+
+	var buffer bytes.Buffer
+	if err := png.Encode(&buffer, result); err != nil {
+		return nil, err
+	}
+	return buffer.Bytes(), nil
+}
+
+func SetClipboardImage(data []byte) error {
+	runtime.LockOSThread()
+	defer runtime.UnlockOSThread()
+
+	sourceImage, _, err := image.Decode(bytes.NewReader(data))
+	if err != nil {
+		return err
+	}
+
+	rgba := image.NewRGBA(sourceImage.Bounds())
+	draw.Draw(rgba, rgba.Bounds(), sourceImage, sourceImage.Bounds().Min, draw.Src)
+
+	hBitmap, err := CreateHBITMAPFromImage(rgba)
+	if err != nil {
+		return err
+	}
+	releaseBitmap := true
+	defer func() {
+		if releaseBitmap {
+			DeleteObject(HGDIOBJ(hBitmap))
+		}
+	}()
+
+	var pngBuffer bytes.Buffer
+	if err := png.Encode(&pngBuffer, sourceImage); err != nil {
+		return err
+	}
+
+	pngHandle, err := newClipboardDataHandle(pngBuffer.Bytes())
+	if err != nil {
+		return err
+	}
+	releasePNG := true
+	defer func() {
+		if releasePNG {
+			kernelGlobalFree.Call(pngHandle)
+		}
+	}()
+
+	if err := waitOpenClipboard(); err != nil {
+		return err
+	}
+
+	r, _, err := procEmptyClipboard.Call(0)
+	if r == 0 {
+		procCloseClipboard.Call()
+		return err
+	}
+
+	if pngFormat := registerClipboardFormat("PNG"); pngFormat != 0 {
+		r, _, err = procSetClipboardData.Call(uintptr(pngFormat), pngHandle)
+		if r == 0 {
+			procCloseClipboard.Call()
+			return err
+		}
+		releasePNG = false
+	}
+
+	r, _, err = procSetClipboardData.Call(uintptr(CF_BITMAP), uintptr(hBitmap))
+	if r == 0 {
+		procCloseClipboard.Call()
+		return err
+	}
+	releaseBitmap = false
+
+	closed, _, err := procCloseClipboard.Call()
+	if closed == 0 {
+		return err
+	}
+	return nil
+}
+
+func registerClipboardFormat(name string) uint {
+	nameUTF16, err := syscall.UTF16PtrFromString(name)
+	if err != nil {
+		return 0
+	}
+	ret, _, _ := procRegisterClipboardFormat.Call(uintptr(unsafe.Pointer(nameUTF16)))
+	return uint(ret)
+}
+
+func getClipboardPNG(format uint) ([]byte, error) {
+	if err := waitOpenClipboard(); err != nil {
+		return nil, err
+	}
+	defer procCloseClipboard.Call()
+
+	handle, _, err := procGetClipboardData.Call(uintptr(format))
+	if handle == 0 {
+		return nil, err
+	}
+
+	locked, _, err := kernelGlobalLock.Call(handle)
+	if locked == 0 {
+		return nil, err
+	}
+	defer kernelGlobalUnlock.Call(handle)
+
+	size, _, err := procGlobalSize.Call(handle)
+	if size == 0 {
+		return nil, err
+	}
+
+	data := make([]byte, int(size))
+	copy(data, unsafe.Slice((*byte)(unsafe.Pointer(locked)), int(size)))
+	return data, nil
+}
+
+func newClipboardDataHandle(data []byte) (uintptr, error) {
+	handle, _, err := kernelGlobalAlloc.Call(gmemMoveable, uintptr(len(data)))
+	if handle == 0 {
+		return 0, err
+	}
+
+	locked, _, err := kernelGlobalLock.Call(handle)
+	if locked == 0 {
+		kernelGlobalFree.Call(handle)
+		return 0, err
+	}
+
+	copy(unsafe.Slice((*byte)(unsafe.Pointer(locked)), len(data)), data)
+
+	r, _, unlockErr := kernelGlobalUnlock.Call(handle)
+	if r == 0 && unlockErr.(syscall.Errno) != 0 {
+		kernelGlobalFree.Call(handle)
+		return 0, unlockErr
+	}
+
+	return handle, nil
 }

@@ -20,6 +20,14 @@ func (c *androidClipboardImpl) text() (string, bool) {
 	return "", false
 }
 
+func (c *androidClipboardImpl) setImage(data []byte) bool {
+	return false
+}
+
+func (c *androidClipboardImpl) image() ([]byte, bool) {
+	return nil, false
+}
+
 // SetClipboardText sets the clipboard text on Android
 func (c *ClipboardManager) SetClipboardText(text string) error {
 	// Android clipboard implementation would go here
